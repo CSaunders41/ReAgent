@@ -24,6 +24,7 @@ public class RuleState
     private readonly Lazy<List<MonsterInfo>> _hiddenMonsters;
     private readonly Lazy<List<MonsterInfo>> _allPlayers;
     private readonly Lazy<List<MonsterInfo>> _corpses;
+    private readonly object _gameController; // Store GameController reference for side effects
 
     public RuleInternalState InternalState
     {
@@ -42,6 +43,7 @@ public class RuleState
     {
         _internalState = internalState;
         var controller = plugin.GameController;
+        _gameController = controller; // Store for side effects to access
         if (controller != null)
         {
             IsInHideout = plugin.GameController.Area.CurrentArea.IsHideout;
@@ -233,4 +235,9 @@ public class RuleState
 
     [Api]
     public bool IsAnyLargePanelOpen => _internalState.LargePanelVisible;
+
+    /// <summary>
+    /// Internal method for side effects to access GameController
+    /// </summary>
+    internal object GetGameController() => _gameController;
 }

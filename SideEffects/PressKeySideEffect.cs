@@ -1,40 +1,84 @@
-﻿using System.Linq.Dynamic.Core.CustomTypeProviders;
+﻿using System;
+using System.Linq.Dynamic.Core.CustomTypeProviders;
 using System.Windows.Forms;
+using ExileCore;
 using ReAgent.State;
-using static ExileCore.Shared.Nodes.HotkeyNodeV2;
 
 namespace ReAgent.SideEffects;
 
+/// <summary>
+/// Presses a key with optional modifiers.
+/// Now uses InputCoordinator for better plugin coordination.
+/// </summary>
 [DynamicLinqType]
 [Api]
-public record PressKeySideEffect(HotkeyNodeValue Key) : ISideEffect
+public record PressKeySideEffect(Keys Key, Keys[]? Modifiers = null) : ISideEffect
 {
-    public PressKeySideEffect(Keys key) : this(new HotkeyNodeValue(key))
-    {
-    }
-
     public SideEffectApplicationResult Apply(RuleState state)
     {
-        if (!state.InternalState.CanPressKey)
+        try
         {
-            return SideEffectApplicationResult.UnableToApply;
-        }
+            // Try to get input control via InputCoordinator
+            var gameController = state.GetGameController();
+            var requestControl = gameController?.GetType()
+                .GetProperty("PluginBridge")?
+                .GetValue(gameController)?
+                .GetType()
+                .GetMethod("GetMethod")?
+                .MakeGenericMethod(typeof(Func<string, int, bool>))?
+                .Invoke(gameController.GetType().GetProperty("PluginBridge").GetValue(gameController), 
+                    new object[] { "InputCoordinator.RequestControl" }) as Func<string, int, bool>;
 
-        if (state.InternalState.KeyToPress == Key)
+            bool hasControl = requestControl?.Invoke("ReAgent", 300) ?? true; // Default to true if no coordinator
+
+            if (!hasControl)
+            {
+                // Another plugin has control, skip this action
+                return SideEffectApplicationResult.ConditionalFailure;
+            }
+
+            // Press modifiers first
+            if (Modifiers != null)
+            {
+                foreach (var modifier in Modifiers)
+                {
+                    Input.KeyDown(modifier);
+                }
+            }
+
+            // Press the main key
+            Input.KeyDown(Key);
+            Input.KeyUp(Key);
+
+            // Release modifiers
+            if (Modifiers != null)
+            {
+                foreach (var modifier in Modifiers.Reverse())
+                {
+                    Input.KeyUp(modifier);
+                }
+            }
+
+            return SideEffectApplicationResult.Success;
+        }
+        catch (Exception ex)
         {
-            return SideEffectApplicationResult.AppliedDuplicate;
-        }
+            // Log error via shared logger if available
+            var gameController = state.GetGameController();
+            var logError = gameController?.GetType()
+                .GetProperty("PluginBridge")?
+                .GetValue(gameController)?
+                .GetType()
+                .GetMethod("GetMethod")?
+                .MakeGenericMethod(typeof(Action<string>))?
+                .Invoke(gameController.GetType().GetProperty("PluginBridge").GetValue(gameController), 
+                    new object[] { "PluginLogger.LogError" }) as Action<string>;
 
-        if (state.InternalState.KeyToPress == null)
-        {
-            state.InternalState.KeyToPress = Key;
-            return SideEffectApplicationResult.AppliedUnique;
-        }
+            logError?.Invoke($"[ReAgent] PressKeySideEffect failed: {ex.Message}");
 
-        return SideEffectApplicationResult.UnableToApply;
+            return SideEffectApplicationResult.Failure;
+        }
     }
-
-    public override string ToString() => $"Press key {Key}";
 }
 
 [DynamicLinqType]

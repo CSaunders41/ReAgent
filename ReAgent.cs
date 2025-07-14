@@ -34,28 +34,94 @@ public sealed class ReAgent : BaseSettingsPlugin<ReAgentSettings>
 
     public override bool Initialise()
     {
-        ProcessID = GameController.Window.Process.Id;
-
-        var stringData = File.ReadAllText(Path.Join(DirectoryFullName, "CustomAilments.json"));
-        CustomAilments = JsonConvert.DeserializeObject<Dictionary<string, List<string>>>(stringData);
-        Settings.DumpState.OnPressed = () => { ImGui.SetClipboardText(JsonConvert.SerializeObject(new RuleState(this, _internalState), new JsonSerializerSettings
+        // Load custom ailments from JSON file
+        var customAilmentsPath = Path.Combine(DirectoryFullName, "CustomAilments.json");
+        if (File.Exists(customAilmentsPath))
         {
-            Error = (sender, args) =>
+            try
             {
-                DebugWindow.LogError($"Error during state dump {args.ErrorContext.Error}");
-                args.ErrorContext.Handled = true;
+                var json = File.ReadAllText(customAilmentsPath);
+                CustomAilments = JsonConvert.DeserializeObject<Dictionary<string, List<string>>>(json);
             }
-        })); };
-        Settings.ImageDirectory.OnValueChanged = () =>
+            catch (Exception ex)
+            {
+                LogError($"Failed to load custom ailments: {ex.Message}");
+                CustomAilments = new Dictionary<string, List<string>>();
+            }
+        }
+        
+        // Load textures
+        var imageDir = Path.Combine(DirectoryFullName, Settings.ImageDirectory);
+        if (Directory.Exists(imageDir))
         {
-            foreach (var loadedTexture in _loadedTextures)
+            foreach (var file in Directory.GetFiles(imageDir, "*.png"))
             {
-                Graphics.DisposeTexture(loadedTexture);
+                if (Graphics.InitImage(file))
+                {
+                    _loadedTextures.Add(file);
+                }
             }
+        }
+        
+        // Get current process ID for disconnect functionality
+        ProcessID = Process.GetCurrentProcess().Id;
+        
+        // Register plugin bridge methods for cross-plugin communication
+        RegisterPluginBridgeMethods();
+        
+        // Initialize PluginBridge for shared utilities
+        InitializeSharedUtilities();
 
-            _loadedTextures.Clear();
-        };
-        return base.Initialise();
+        return true;
+    }
+    
+    /// <summary>
+    /// Registers plugin bridge methods to allow other plugins to coordinate with ReAgent
+    /// </summary>
+    private void RegisterPluginBridgeMethods()
+    {
+        try
+        {
+            // Register method to check if ReAgent is actively processing rules
+            GameController.PluginBridge.SaveMethod("ReAgent.IsActive", () => {
+                if (!Settings.Enable.Value)
+                    return false;
+                
+                // Check if we have pending side effects or recently processed actions
+                if (_pendingSideEffects.Count > 0)
+                    return true;
+                
+                // Check if we recently sent a key press (within last 200ms)
+                if (_sinceLastKeyPress.ElapsedMilliseconds < 200)
+                    return true;
+                
+                return false;
+            });
+            
+            // Register method to get ReAgent's current execution state
+            GameController.PluginBridge.SaveMethod("ReAgent.GetCoordinationState", () => {
+                return new {
+                    IsEnabled = Settings.Enable.Value,
+                    PendingSideEffects = _pendingSideEffects.Count,
+                    MillisecondsSinceLastKeyPress = _sinceLastKeyPress.ElapsedMilliseconds,
+                    CanPressKey = _internalState?.CanPressKey ?? false,
+                    IsProcessingRules = _state != null && ShouldExecute(out _)
+                };
+            });
+            
+            // Register method to get timing information for coordination
+            GameController.PluginBridge.SaveMethod("ReAgent.GetTimingInfo", () => {
+                return new {
+                    GlobalKeyPressCooldown = Settings.GlobalKeyPressCooldown.Value,
+                    TimeSinceLastKeyPress = _sinceLastKeyPress.ElapsedMilliseconds,
+                    RecentlyActive = _sinceLastKeyPress.ElapsedMilliseconds < 200
+                };
+            });
+        }
+        catch (Exception ex)
+        {
+            LogError($"Failed to register plugin bridge methods: {ex.Message}");
+        }
     }
 
     private string _profileImportInput = null;
@@ -125,6 +191,65 @@ public sealed class ReAgent : BaseSettingsPlugin<ReAgentSettings>
                 _profileImportInput = null;
                 _profileImportObject = null;
             }
+        }
+    }
+
+    /// <summary>
+    /// Initializes access to shared utilities via PluginBridge.
+    /// </summary>
+    private void InitializeSharedUtilities()
+    {
+        try
+        {
+            // Check for InputCoordinator
+            var requestControlMethod = GameController.PluginBridge.GetMethod<Func<string, int, bool>>("InputCoordinator.RequestControl");
+            if (requestControlMethod != null)
+            {
+                LogMessage("InputCoordinator detected via PluginBridge", 5);
+            }
+
+            // Check for PluginLogger
+            var logMethod = GameController.PluginBridge.GetMethod<Action<string, string>>("PluginLogger.Log");
+            if (logMethod != null)
+            {
+                LogMessage("PluginLogger detected via PluginBridge", 5);
+            }
+        }
+        catch (Exception ex)
+        {
+            LogError($"Failed to initialize shared utilities: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Override LogMessage to use shared logger if available
+    /// </summary>
+    public override void LogMessage(string message, float time = 1f)
+    {
+        var sharedLog = GameController.PluginBridge.GetMethod<Action<string, string>>("PluginLogger.Log");
+        if (sharedLog != null)
+        {
+            sharedLog("Info", $"[ReAgent] {message}");
+        }
+        else
+        {
+            base.LogMessage(message, time);
+        }
+    }
+
+    /// <summary>
+    /// Override LogError to use shared logger
+    /// </summary>
+    public override void LogError(string message)
+    {
+        var sharedLog = GameController.PluginBridge.GetMethod<Action<string, string>>("PluginLogger.Log");
+        if (sharedLog != null)
+        {
+            sharedLog("Error", $"[ReAgent] {message}");
+        }
+        else
+        {
+            base.LogError(message);
         }
     }
 
